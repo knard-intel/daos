@@ -115,8 +115,8 @@ daos_mgmt_get_bs_state(const char *group, uuid_t blobstore_uuid,
  * \param[in] group		Name of DAOS system managing the service.
  * \param[in] devuuid		UUID of the device
  * \param[in] ev		Completion event. Optional and can be NULL.
- * 				The function will run in blocking mode
- * 				if \a ev is NULL.
+ *				The function will run in blocking mode
+ *				if \a ev is NULL.
  *
  * \return			0		Success
  *
@@ -130,12 +130,12 @@ daos_mgmt_reset_led_state(const char *group, uuid_t devuuid, daos_event_t *ev);
  * \param[in] group		Name of DAOS system managing the service.
  * \param[in] devuuid		UUID of the device
  * \param[out] led_state	Will return enum integer that will later be
- * 				converted to the current LED state:
+ *				converted to the current LED state:
  *				OFF(0), IDENTIFY(1), FAULT(2), REBUILD(3),
  *				UNKNOWN(4)
  * \param[in] ev		Completion event. Optional and can be NULL.
- * 				The function will run in blocking mode
- * 				if \a ev is NULL.
+ *				The function will run in blocking mode
+ *				if \a ev is NULL.
  *
  * \return			0		Success
  *
