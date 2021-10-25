@@ -311,7 +311,7 @@ cont_child_aggregate(struct ds_cont_child *cont, cont_aggregate_cb_t agg_cb,
 	if (cont->sc_snapshots_nr + 1 < MAX_SNAPSHOT_LOCAL) {
 		snapshots = snapshots_local;
 	} else {
-		D_ALLOC(snapshots, (cont->sc_snapshots_nr + 1) *
+		DM_ALLOC(M_CONT, snapshots, (cont->sc_snapshots_nr + 1) *
 			sizeof(daos_epoch_t));
 		if (snapshots == NULL)
 			return -DER_NOMEM;
@@ -697,7 +697,7 @@ cont_child_alloc_ref(void *co_uuid, unsigned int ksize, void *po_uuid,
 	D_ASSERT(po_uuid != NULL);
 	D_DEBUG(DF_DSMS, DF_CONT": opening\n", DP_CONT(po_uuid, co_uuid));
 
-	D_ALLOC_PTR(cont);
+	DM_ALLOC_PTR(M_CONT, cont);
 	if (cont == NULL)
 		return -DER_NOMEM;
 
@@ -1476,7 +1476,7 @@ ds_cont_local_open(uuid_t pool_uuid, uuid_t cont_hdl_uuid, uuid_t cont_uuid,
 		return rc;
 	}
 
-	D_ALLOC_PTR(hdl);
+	DM_ALLOC_PTR(M_CONT, hdl);
 	if (hdl == NULL)
 		return -DER_NOMEM;
 
@@ -1561,7 +1561,7 @@ ds_cont_local_open(uuid_t pool_uuid, uuid_t cont_hdl_uuid, uuid_t cont_uuid,
 			D_GOTO(err_reindex, rc);
 		}
 
-		D_ALLOC_PTR(ddra);
+		DM_ALLOC_PTR(M_CONT, ddra);
 		if (ddra == NULL)
 			D_GOTO(err_register, rc = -DER_NOMEM);
 
@@ -1839,7 +1839,7 @@ ds_cont_query_stream_alloc(struct dss_stream_arg_type *args,
 {
 	struct xstream_cont_query	*rarg = a_arg;
 
-	D_ALLOC(args->st_arg, sizeof(struct xstream_cont_query));
+	DM_ALLOC(M_CONT, args->st_arg, sizeof(struct xstream_cont_query));
 	if (args->st_arg == NULL)
 		return -DER_NOMEM;
 	memcpy(args->st_arg, rarg, sizeof(struct xstream_cont_query));
@@ -1931,8 +1931,7 @@ cont_snap_update_one(void *vin)
 	} else {
 		uint64_t *snaps;
 
-		D_REALLOC_ARRAY_NZ(snaps, cont->sc_snapshots,
-				   args->snap_count);
+		DM_REALLOC_ARRAY_NZ(M_CONT, snaps, cont->sc_snapshots, args->snap_count);
 		if (snaps == NULL) {
 			rc = -DER_NOMEM;
 			goto out_cont;
@@ -1998,7 +1997,7 @@ ds_cont_tgt_snapshots_refresh(uuid_t pool_uuid, uuid_t cont_uuid)
 	struct cont_snap_args	*args;
 	int			 rc;
 
-	D_ALLOC_PTR(args);
+	DM_ALLOC_PTR(M_CONT, args);
 	if (args == NULL)
 		return -DER_NOMEM;
 	uuid_copy(args->pool_uuid, pool_uuid);
@@ -2307,7 +2306,7 @@ cont_ec_eph_alloc(d_list_t *ec_list, uuid_t cont_uuid)
 {
 	struct cont_ec_eph	*new_ec;
 
-	D_ALLOC_PTR(new_ec);
+	DM_ALLOC_PTR(M_CONT, new_ec);
 	if (new_ec == NULL)
 		return NULL;
 

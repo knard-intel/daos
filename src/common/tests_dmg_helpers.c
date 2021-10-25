@@ -23,7 +23,7 @@ cmd_free_args(char **args, int argcount)
 	for (i = 0; i < argcount; i++)
 		D_FREE(args[i]);
 
-	D_FREE(args);
+	free(args);
 }
 
 static char **

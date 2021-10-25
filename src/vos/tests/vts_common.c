@@ -55,7 +55,7 @@ vts_alloc_gen_fname(char **fname)
 	char *file_name = NULL;
 	int n;
 
-	file_name = malloc(25);
+	D_ALLOC(file_name, 25);
 	if (!file_name)
 		return -ENOMEM;
 	n = snprintf(file_name, 25, VPOOL_NAME);
