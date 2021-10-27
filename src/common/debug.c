@@ -212,7 +212,6 @@ DP_UUID(const void *uuid)
 
 #ifndef DAOS_BUILD_RELEASE
 #define DF_KEY_MAX		8
-#define DF_KEY_STR_SIZE		64
 
 static __thread int thread_key_buf_idx;
 static __thread char thread_key_buf[DF_KEY_MAX][DF_KEY_STR_SIZE];
@@ -238,12 +237,19 @@ daos_key2str(daos_key_t *key)
 				break;
 			}
 		}
-		if (can_print) {
+
+		if (can_print)
 			strncpy(buf, key->iov_buf, len);
-			buf[len] = 0;
-		} else {
+		else
 			strcpy(buf, "????");
+
+		len = min(len, strlen(buf));
+		if (key->iov_len == sizeof(uint64_t)) {
+			sprintf(buf + len, " uint64:"DF_U64, *(uint64_t *)key->iov_buf);
+			len += strlen(buf + len);
 		}
+		D_ASSERTF(len <= (DF_KEY_STR_SIZE - 1), "len %d\n", len);
+		buf[len] = 0;
 	}
 	thread_key_buf_idx = (thread_key_buf_idx + 1) % DF_KEY_MAX;
 	return buf;
