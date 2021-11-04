@@ -14,19 +14,23 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
+	"github.com/daos-stack/daos/src/control/common"
 	"github.com/daos-stack/daos/src/control/logging"
 	"github.com/daos-stack/daos/src/control/server/engine"
 	"github.com/daos-stack/daos/src/control/server/storage"
 )
+
+type hugePageInfoFn func() (*common.HugePageInfo, error)
 
 // StorageControlService encapsulates the storage part of the control service
 type StorageControlService struct {
 	log             logging.Logger
 	storage         *storage.Provider
 	instanceStorage map[uint32]*storage.Config
+	getHugePageInfo hugePageInfoFn
 }
 
-func newStorageControlService(l logging.Logger, ecs []*engine.Config, sp *storage.Provider) *StorageControlService {
+func newStorageControlService(l logging.Logger, ecs []*engine.Config, sp *storage.Provider, hpiFn hugePageInfoFn) *StorageControlService {
 	instanceStorage := make(map[uint32]*storage.Config)
 	for i, c := range ecs {
 		instanceStorage[uint32(i)] = &c.Storage
@@ -36,6 +40,7 @@ func newStorageControlService(l logging.Logger, ecs []*engine.Config, sp *storag
 		log:             l,
 		storage:         sp,
 		instanceStorage: instanceStorage,
+		getHugePageInfo: hpiFn,
 	}
 }
 
@@ -45,6 +50,7 @@ func NewStorageControlService(log logging.Logger, engineCfgs []*engine.Config) *
 		storage.DefaultProvider(log, 0, &storage.Config{
 			Tiers: nil,
 		}),
+		common.GetHugePageInfo,
 	)
 }
 
@@ -55,6 +61,9 @@ func NewMockStorageControlService(log logging.Logger, engineCfgs []*engine.Confi
 		storage.MockProvider(log, 0, &storage.Config{
 			Tiers: nil,
 		}, sys, scm, bdev),
+		func() (*common.HugePageInfo, error) {
+			return nil, nil
+		},
 	)
 }
 
