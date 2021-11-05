@@ -6,38 +6,6 @@
 
 package netdetect
 
-/*
-#cgo LDFLAGS: -lhwloc -lfabric
-#include <stdlib.h>
-#include <stdio.h>
-#include <rdma/fabric.h>
-#include <rdma/fi_domain.h>
-#include <rdma/fi_endpoint.h>
-#include <rdma/fi_cm.h>
-#include <rdma/fi_tagged.h>
-#include <rdma/fi_rma.h>
-#include <rdma/fi_errno.h>
-
-#define getHFIUnitError -2
-typedef struct {
-	uint64_t reserved_1;
-	uint8_t  reserved_2;
-	int8_t   unit;
-	uint8_t  port;
-	uint8_t  reserved_3;
-	uint32_t service;
-} psmx2_ep_name;
-
-int getHFIUnit(void *src_addr) {
-	psmx2_ep_name *psmx2;
-	psmx2 = (psmx2_ep_name *)src_addr;
-	if (!psmx2)
-		return getHFIUnitError;
-	return psmx2->unit;
-}
-*/
-import "C"
-
 import (
 	"context"
 	"fmt"
@@ -48,6 +16,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/daos-stack/daos/src/control/lib/netdetect/fabric"
 	"github.com/daos-stack/daos/src/control/lib/netdetect/hwloc"
 	"github.com/daos-stack/daos/src/control/logging"
 )
@@ -58,11 +27,7 @@ const (
 	direct = iota
 	sibling
 	bestfit
-	libFabricMajorVersion     = 1
-	libFabricMinorVersion     = 7
-	allHFIUsed                = -1
-	badAddress                = C.getHFIUnitError
-	topologyKey           key = 0
+	topologyKey key = 0
 	// ARP protocol hardware identifiers: https://elixir.free-electrons.com/linux/v4.0/source/include/uapi/linux/if_arp.h#L29
 	Netrom     = 0
 	Ether      = 1
@@ -801,9 +766,6 @@ func getHFIDeviceCount(hwlocDeviceNames []string) int {
 
 // ValidateProviderConfig confirms that the given network device supports the chosen provider
 func ValidateProviderConfig(ctx context.Context, device string, provider string) error {
-	var fi *C.struct_fi_info
-	var hints *C.struct_fi_info
-
 	if provider == "" {
 		return errors.New("provider required")
 	}
@@ -826,18 +788,11 @@ func ValidateProviderConfig(ctx context.Context, device string, provider string)
 		return err
 	}
 
-	hints = C.fi_allocinfo()
-	if hints == nil {
-		return errors.New("unable to initialize lib fabric - failed to allocinfo")
+	fiInfo, cleanupFI, err := fabric.GetFIList(libfabricProviderList)
+	if err != nil {
+		return nil
 	}
-	defer C.fi_freeinfo(hints)
-
-	hints.fabric_attr.prov_name = C.strdup(C.CString(libfabricProviderList))
-	C.fi_getinfo(C.uint(libFabricMajorVersion<<16|libFabricMinorVersion), nil, nil, 0, hints, &fi)
-	if fi == nil {
-		return errors.New("unable to initialize lib fabric")
-	}
-	defer C.fi_freeinfo(fi)
+	defer cleanupFI()
 
 	ndc, err := getContext(ctx)
 	if err != nil {
@@ -856,11 +811,11 @@ func ValidateProviderConfig(ctx context.Context, device string, provider string)
 	// or may be a decorated device name such as "hfi1_0-dgram" that maps to "hfi1_0" that maps to a system device "ib0"
 	// In order to find a device and provider match, the libfabric device name must be converted into a system device name.
 	// GetAffinityForDevice() is used to provide this conversion inside deviceProviderMatch()
-	for ; fi != nil; fi = fi.next {
-		if fi.domain_attr == nil || fi.domain_attr.name == nil || fi.fabric_attr == nil || fi.fabric_attr.prov_name == nil {
+	for _, fi := range fiInfo {
+		if !fi.HasDomain() || !fi.HasProvider() {
 			continue
 		}
-		ndc.deviceScanCfg.targetDevice = C.GoString(fi.domain_attr.name)
+		ndc.deviceScanCfg.targetDevice = fi.Domain()
 
 		// Implements a workaround to handle the current psm2 provider behavior
 		// that reports fi.domain_attr.name as "psm2" instead of an actual device
@@ -876,29 +831,29 @@ func ValidateProviderConfig(ctx context.Context, device string, provider string)
 		//
 		// Note that "hfi1_x" is converted to a system device name such as "ibx"
 		// by the call to GetAffinityForDevice() as part of deviceProviderMatch()
-		if C.GoString(fi.fabric_attr.prov_name) == "psm2" {
+		if fi.Provider() == "psm2" {
 			if strings.Contains(ndc.deviceScanCfg.targetDevice, "psm2") {
 				log.Debugf("psm2 provider and psm2 device found.")
-				hfiUnit := C.getHFIUnit(fi.src_addr)
-				switch hfiUnit {
-				case allHFIUsed:
-					for deviceID := 0; deviceID < hfiDeviceCount; deviceID++ {
-						ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", deviceID)
-						if deviceProviderMatch(ndc.deviceScanCfg, provider, device) {
-							return nil
+				hfiUnit, err := fi.GetHFIUnit()
+				if err != nil {
+					if err.Error() == "all HFI used" {
+						for deviceID := 0; deviceID < hfiDeviceCount; deviceID++ {
+							ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", deviceID)
+							if deviceProviderMatch(ndc.deviceScanCfg, provider, device) {
+								return nil
+							}
 						}
+						continue
 					}
+
+					log.Debugf("not adding hfi1_n scan result: %s", err.Error())
 					continue
-				case badAddress:
-					log.Debugf("The fi.src_addr was null - not adding hfi1_n scan result")
-					continue
-				default: // The hfi unit is stated explicitly
-					log.Debugf("Found hfi1_%d (actual)", hfiUnit)
-					ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", hfiUnit)
-					if deviceProviderMatch(ndc.deviceScanCfg, provider, device) {
-						return nil
-					}
-					continue
+				}
+				// The hfi unit is stated explicitly
+				log.Debugf("Found hfi1_%d (actual)", hfiUnit)
+				ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", hfiUnit)
+				if deviceProviderMatch(ndc.deviceScanCfg, provider, device) {
+					return nil
 				}
 			}
 		}
@@ -1008,17 +963,11 @@ func createFabricScanEntry(deviceScanCfg DeviceScan, provider string, devCount i
 // ScanFabric examines libfabric data to find the network devices that support the given fabric provider.
 func ScanFabric(ctx context.Context, provider string, excludes ...string) ([]*FabricScan, error) {
 	var ScanResults []*FabricScan
-	var fi *C.struct_fi_info
-	var hints *C.struct_fi_info
 	var devCount int
 
 	resultsMap := make(map[string]struct{})
 
-	hints = C.fi_allocinfo()
-	if hints == nil {
-		return ScanResults, errors.New("unable to initialize lib fabric - failed to allocinfo")
-	}
-	defer C.fi_freeinfo(hints)
+	providerHint := ""
 
 	// If a provider was given, then set the libfabric search hint to match the provider
 	if provider != "" {
@@ -1028,16 +977,14 @@ func ScanFabric(ctx context.Context, provider string, excludes ...string) ([]*Fa
 			return ScanResults, err
 		}
 		log.Debugf("Final libFabricProviderList is %s", libfabricProviderList)
-		hints.fabric_attr.prov_name = C.strdup(C.CString(libfabricProviderList))
+		providerHint = libfabricProviderList
 	}
 
-	// Initialize libfabric and perform the scan
-	C.fi_getinfo(C.uint(libFabricMajorVersion<<16|libFabricMinorVersion), nil, nil, 0, hints, &fi)
-	if fi == nil {
-		log.Debugf("libfabric found no records matching the specified provider")
-		return ScanResults, nil
+	fiInfo, cleanupFI, err := fabric.GetFIList(providerHint)
+	if err != nil {
+		return nil, err
 	}
-	defer C.fi_freeinfo(fi)
+	defer cleanupFI()
 
 	ndc, err := getContext(ctx)
 	if err != nil {
@@ -1052,11 +999,11 @@ func ScanFabric(ctx context.Context, provider string, excludes ...string) ([]*Fa
 		excludeMap[iface] = struct{}{}
 	}
 
-	for ; fi != nil; fi = fi.next {
-		if fi.domain_attr == nil || fi.domain_attr.name == nil || fi.fabric_attr == nil || fi.fabric_attr.prov_name == nil {
+	for _, fi := range fiInfo {
+		if !fi.HasDomain() || !fi.HasProvider() {
 			continue
 		}
-		ndc.deviceScanCfg.targetDevice = C.GoString(fi.domain_attr.name)
+		ndc.deviceScanCfg.targetDevice = fi.Domain()
 		// Implements a workaround to handle the current psm2 provider behavior
 		// that reports fi.domain_attr.name as "psm2" instead of an actual device
 		// name like "hfi1_0".
@@ -1074,35 +1021,35 @@ func ScanFabric(ctx context.Context, provider string, excludes ...string) ([]*Fa
 			provider = "All"
 		}
 
-		if strings.Contains(C.GoString(fi.fabric_attr.prov_name), "psm2") {
+		if strings.Contains(fi.Provider(), "psm2") {
 			if strings.Contains(ndc.deviceScanCfg.targetDevice, "psm2") {
 				log.Debugf("psm2 provider and psm2 device found.")
-				hfiUnit := C.getHFIUnit(fi.src_addr)
-				switch hfiUnit {
-				case allHFIUsed:
-					for deviceID := 0; deviceID < hfiDeviceCount; deviceID++ {
-						ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", deviceID)
-						devScanResults, err := createFabricScanEntry(ndc.deviceScanCfg, C.GoString(fi.fabric_attr.prov_name), devCount, resultsMap, excludeMap)
-						if err != nil {
-							continue
+				hfiUnit, err := fi.GetHFIUnit()
+				if err != nil {
+					if err.Error() == "all HFI used" {
+						for deviceID := 0; deviceID < hfiDeviceCount; deviceID++ {
+							ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", deviceID)
+							devScanResults, err := createFabricScanEntry(ndc.deviceScanCfg, fi.Provider(), devCount, resultsMap, excludeMap)
+							if err != nil {
+								continue
+							}
+							log.Debugf("scan result: %v\n", devScanResults)
+							ScanResults = append(ScanResults, devScanResults)
+							devCount++
 						}
-						log.Debugf("scan result: %v\n", devScanResults)
-						ScanResults = append(ScanResults, devScanResults)
-						devCount++
+						continue
 					}
-					continue
-				case badAddress:
-					log.Debugf("The fi.src_addr was null - not adding hfi1_n scan result")
-					continue
-				default: // The hfi unit is stated explicitly
-					log.Debugf("Found hfi1_%d (actual)", hfiUnit)
-					ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", hfiUnit)
+
+					log.Debugf("not adding hfi1_n scan result: %s", err.Error())
 					continue
 				}
+
+				log.Debugf("Found hfi1_%d (actual)", hfiUnit)
+				ndc.deviceScanCfg.targetDevice = fmt.Sprintf("hfi1_%d", hfiUnit)
 			}
 		}
 
-		devScanResults, err := createFabricScanEntry(ndc.deviceScanCfg, C.GoString(fi.fabric_attr.prov_name), devCount, resultsMap, excludeMap)
+		devScanResults, err := createFabricScanEntry(ndc.deviceScanCfg, fi.Provider(), devCount, resultsMap, excludeMap)
 		if err != nil {
 			continue
 		}
