@@ -25,9 +25,11 @@ struct dm_tls_counter {
 	bool		 mtc_registered;
 };
 
+static __thread bool dm_tls_enabled;
 /** thread-local counters */
 static __thread struct dm_tls_counter dm_tls_counters[M_TAG_MAX];
-static pthread_mutex_t	dm_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_spinlock_t dm_lock;
 
 /** Assuming no more than 128 xstreams */
 #define DM_TLS_MAX	128
@@ -42,6 +44,8 @@ struct dm_counters {
 	char			*mc_name;
 	/** all the registered tls counters */
 	struct dm_tls_counter	*mc_tls_cntrs[DM_TLS_MAX];
+	/** counter shared by non-service threads */
+	struct dm_tls_counter	 mc_cntr;
 };
 
 static struct dm_counters	dm_counters[] = {
@@ -175,11 +179,49 @@ static struct dm_counters	dm_counters[] = {
 	},
 };
 
+int
+dm_init(void)
+{
+	int	rc;
+
+	rc = D_SPIN_INIT(&dm_lock, PTHREAD_PROCESS_PRIVATE);
+	if (rc)
+		return -DER_NOMEM;
+
+	return 0;
+}
+
+void
+dm_fini(void)
+{
+	D_SPIN_DESTROY(&dm_lock);
+}
+
+void
+dm_use_tls_counter(void)
+{
+	dm_tls_enabled = true;
+}
+
+void
+dm_cntr_lock(void)
+{
+	if (!dm_tls_enabled)
+		D_SPIN_LOCK(&dm_lock);
+}
+
+void
+dm_cntr_unlock(void)
+{
+	if (!dm_tls_enabled)
+		D_SPIN_UNLOCK(&dm_lock);
+}
+
 /* register thread-local counter to the counter table, so we can
  * collect the summary, see dm_tag_query().
  */
 static void
-dm_tls_register(int tag, struct dm_tls_counter *mtc)
+dm_counter_register(int tag, struct dm_tls_counter *mtc)
 {
 	struct dm_counters	*mc;
 
@@ -187,7 +229,7 @@ dm_tls_register(int tag, struct dm_tls_counter *mtc)
 	D_ASSERTF(tag == mc->mc_tag, "Mismatched tag %s: %d/%d\n",
 		  mc->mc_name, mc->mc_tag, tag);
 
-	pthread_mutex_lock(&dm_lock);
+	D_SPIN_LOCK(&dm_lock);
 
 	D_ASSERT(mc->mc_last < DM_TLS_MAX);
 	D_ASSERT(mc->mc_tls_cntrs[mc->mc_last] == NULL);
@@ -196,7 +238,7 @@ dm_tls_register(int tag, struct dm_tls_counter *mtc)
 	mc->mc_last++;
 	mtc->mtc_registered = true;
 
-	pthread_mutex_unlock(&dm_lock);
+	D_SPIN_UNLOCK(&dm_lock);
 }
 
 char *
@@ -214,13 +256,16 @@ dm_mem_tag_query(int tag, int64_t *size_p, int64_t *count_p)
 	mc = &dm_counters[tag];
 	D_ASSERT(mc->mc_tag == tag);
 
-	pthread_mutex_lock(&dm_lock);
+	D_SPIN_LOCK(&dm_lock);
+	size = mc->mc_cntr.mtc_size;
+	count = mc->mc_cntr.mtc_count;
+
 	for (i = size = count = 0; i < mc->mc_last; i++) {
 		D_ASSERT(mc->mc_tls_cntrs[i]);
 		size += mc->mc_tls_cntrs[i]->mtc_size;
 		count += mc->mc_tls_cntrs[i]->mtc_count;
 	}
-	pthread_mutex_unlock(&dm_lock);
+	D_SPIN_UNLOCK(&dm_lock);
 	if (size_p)
 		*size_p = size;
 	if (count_p)
@@ -254,7 +299,26 @@ dm_mem_dump_log(void)
 static struct dm_header *
 dm_ptr2hdr(void *ptr)
 {
-	return ptr - sizeof(struct dm_header);
+	struct dm_header *hdr;
+
+	hdr = ptr - sizeof(struct dm_header);
+	D_ASSERTF(hdr->mh_magic == DM_MAGIC_HDR,
+		  "corrupted memory header(magic=%x), allocated by %s:%d\n",
+		  hdr->mh_magic, hdr->mh_func, hdr->mh_line);
+	return hdr;
+}
+
+static struct dm_tail *
+dm_ptr2tail(void *ptr)
+{
+	struct dm_header *hdr = dm_ptr2hdr(ptr);
+	struct dm_tail	 *tail;
+
+	tail = (struct dm_tail *)(ptr + hdr->mh_size);
+	D_ASSERTF(tail->mt_magic == DM_MAGIC_TAIL,
+		  "corrupted memory tail(magic=%x), allocated by %s:%d\n",
+		  tail->mt_magic, hdr->mh_func, hdr->mh_line);
+	return tail;
 }
 
 static void *
@@ -268,41 +332,53 @@ dm_free(void *ptr)
 {
 	struct dm_tls_counter	*mtc;
 	struct dm_header	*hdr;
+	struct dm_tail		*tail;
 
 	if (!ptr)
 		return;
 
 	hdr = dm_ptr2hdr(ptr);
+	tail = dm_ptr2tail(ptr);
 	/* NB: counter might belong to a different xstream, so it's not 100% safe w/o lock
 	 * but it's for debugging and hurts nothing except returning inaccurate result.
 	 */
-	mtc = hdr->mh_counter;
+	mtc = tail->mt_counter;
 	D_ASSERT(mtc);
 
+	dm_cntr_lock();
 	mtc->mtc_size -= hdr->mh_size;
 	mtc->mtc_count--;
+	dm_cntr_unlock();
+
 	/* this is the real allocated address */
 	D_ASSERT(hdr->mh_addr);
 	free(hdr->mh_addr);
 }
 
 static void *
-dm_alloc(int tag, int alignment, size_t size)
+dm_alloc(int tag, int alignment, size_t size, const char *func, int line)
 {
 	struct dm_tls_counter	*mtc;
 	struct dm_header	*hdr;
+	struct dm_tail		*tail;
 	void			*buf;
 	int			 hdr_size = sizeof(*hdr);
 
 	D_ASSERTF(tag >= M_OTHER && tag < M_TAG_MAX, "tag=%d, alignment=%d, size="DF_U64"\n",
 		  tag, alignment, size);
 
-	mtc = &dm_tls_counters[tag];
-	if (!mtc->mtc_registered) /* register the thread-local counter */
-		dm_tls_register(tag, mtc);
+	if (dm_tls_enabled) {
+		mtc = &dm_tls_counters[tag];
+		/* register the thread-local counter */
+		if (!mtc->mtc_registered)
+			dm_counter_register(tag, mtc);
+	} else {
+		/* use the global counter */
+		mtc = &dm_counters[tag].mc_cntr;
+	}
 
 	if (alignment == 0) {
-		buf = malloc(hdr_size + size);
+		buf = malloc(hdr_size + size + sizeof(*tail));
 		if (!buf)
 			return NULL;
 
@@ -314,21 +390,30 @@ dm_alloc(int tag, int alignment, size_t size)
 		while (alignment < hdr_size)
 			alignment += nob;
 
-		buf = aligned_alloc(alignment, alignment + size);
+		buf = aligned_alloc(alignment, alignment + size + sizeof(*tail));
 		if (!buf)
 			return NULL;
 
 		hdr = buf + alignment - hdr_size;
 		hdr->mh_alignment = alignment;
 	}
-
-	hdr->mh_addr	= buf;
+	hdr->mh_func	= func;
+	hdr->mh_line	= line;
 	hdr->mh_tag	= tag;
+	hdr->mh_addr	= buf;
 	hdr->mh_size	= size;
-	hdr->mh_counter = mtc;
+	hdr->mh_magic	= DM_MAGIC_HDR;
 
+	tail = (struct dm_tail *)(dm_hdr2ptr(hdr) + size);
+	tail->mt_magic	 = DM_MAGIC_TAIL;
+	tail->mt_reserv	 = 0;
+	tail->mt_counter = mtc;
+
+	dm_cntr_lock();
 	mtc->mtc_size += size;
 	mtc->mtc_count++;
+	dm_cntr_unlock();
+
 	return dm_hdr2ptr(hdr);
 }
 
@@ -339,26 +424,26 @@ d_free(void *ptr)
 }
 
 void *
-d_malloc(int tag, size_t size)
+d_malloc(int tag, size_t size, const char *func, int line)
 {
-	return dm_alloc(tag, 0, size);
+	return dm_alloc(tag, 0, size, func, line);
 }
 
 void *
-d_calloc(int tag, size_t count, size_t eltsize)
+d_calloc(int tag, size_t count, size_t eltsize, const char *func, int line)
 {
 	void   *buf;
 	size_t  rsize = count * eltsize;
 
-	buf = dm_alloc(tag, 0, rsize);
+	buf = dm_alloc(tag, 0, rsize, func, line);
 	memset(buf, 0, rsize);
 	return buf;
 }
 
 void *
-d_realloc(int tag, void *ptr, size_t size)
+d_realloc(int tag, void *ptr, size_t size, const char *func, int line)
 {
-	struct dm_header	*hdr;
+	struct dm_header	*hdr = NULL;
 	void			*new_ptr;
 	int			 alignment = 0;
 
@@ -367,11 +452,9 @@ d_realloc(int tag, void *ptr, size_t size)
 		hdr = dm_ptr2hdr(ptr);
 		tag = hdr->mh_tag;
 		alignment = hdr->mh_alignment;
-	} else {
-		hdr = NULL;
 	}
 
-	new_ptr = dm_alloc(tag, alignment, size);
+	new_ptr = dm_alloc(tag, alignment, size, func, line);
 	if (!new_ptr)
 		return NULL;
 
@@ -387,7 +470,7 @@ d_strndup(const char *s, size_t n)
 {
 	char	*str;
 
-	str = dm_alloc(M_STR, 0, n + 1);
+	str = dm_alloc(M_STR, 0, n + 1, __func__, __LINE__);
 	if (!str)
 		return NULL;
 
@@ -411,7 +494,7 @@ d_asprintf(char **strp, const char *fmt, ...)
 	if (rc < 0)
 		return rc;
 
-	tmp2 = dm_alloc(M_STR, 0, strlen(tmp1) + 1);
+	tmp2 = dm_alloc(M_STR, 0, strlen(tmp1) + 1, __func__, __LINE__);
 	if (!tmp2) {
 		free(tmp1);
 		return -1;
@@ -434,7 +517,7 @@ d_realpath(const char *path, char *resolved_path)
 	 * not NULL terminated.
 	 */
 	if (!resolved_path) {
-		tmp1 = d_calloc(M_STR, strlen(path) + 1, 1);
+		tmp1 = d_calloc(M_STR, strlen(path) + 1, 1, __func__, __LINE__);
 		if (!tmp1)
 			return NULL;
 	} else {
@@ -453,12 +536,28 @@ d_realpath(const char *path, char *resolved_path)
 }
 
 void *
-d_aligned_alloc(int tag, size_t alignment, size_t size)
+d_aligned_alloc(int tag, size_t alignment, size_t size, const char *func, int line)
 {
-	return dm_alloc(tag, alignment, size);
+	return dm_alloc(tag, alignment, size, func, line);
 }
 
 #else /* DAOS_BUILD_RELEASE */
+
+int
+dm_init(void)
+{
+	return 0;
+}
+
+void
+dm_fini(void)
+{
+}
+
+void
+dm_use_tls_counter(void)
+{
+}
 
 char *
 dm_mem_tag_query(int tag, int64_t *size_p, int64_t *count_p)
@@ -478,19 +577,19 @@ d_free(void *ptr)
 }
 
 void *
-d_calloc(int tag, size_t count, size_t eltsize)
+d_calloc(int tag, size_t count, size_t eltsize, const char *func, int line)
 {
 	return calloc(count, eltsize);
 }
 
 void *
-d_malloc(int tag, size_t size)
+d_malloc(int tag, size_t size, const char *func, int line)
 {
 	return malloc(size);
 }
 
 void *
-d_realloc(int tag, void *ptr, size_t size)
+d_realloc(int tag, void *ptr, size_t size, const char *func, int line)
 {
 	return realloc(ptr, size);
 }
@@ -521,7 +620,7 @@ d_realpath(const char *path, char *resolved_path)
 }
 
 void *
-d_aligned_alloc(int tag, size_t alignment, size_t size)
+d_aligned_alloc(int tag, size_t alignment, size_t size, const char *func, int line)
 {
 	return aligned_alloc(alignment, size);
 }

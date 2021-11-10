@@ -65,12 +65,12 @@ extern "C" {
 
 /* memory allocating macros */
 void  d_free(void *);
-void *d_calloc(int tag, size_t, size_t);
-void *d_malloc(int tag, size_t);
-void *d_realloc(int tag, void *, size_t);
+void *d_calloc(int tag, size_t, size_t, const char *func, int line);
+void *d_malloc(int tag, size_t, const char *func, int line);
+void *d_realloc(int tag, void *, size_t, const char *func, int line);
 char *d_strndup(const char *s, size_t n);
 int d_asprintf(char **strp, const char *fmt, ...);
-void *d_aligned_alloc(int tag, size_t alignment, size_t size);
+void *d_aligned_alloc(int tag, size_t alignment, size_t size, const char *func, int line);
 char *d_realpath(const char *path, char *resolved_path);
 
 /** Allocation tag, please make sure dm_counters are declared in the same order. */
@@ -111,19 +111,34 @@ enum dm_tag {
 
 struct dm_tls_counter;
 
+#define DM_MAGIC_HDR	0xCAFE
+#define DM_MAGIC_TAIL	0xBABEFACE
+
 /* 32 bytes header in memory-debugging mode */
 struct dm_header {
-	struct dm_tls_counter	*mh_counter;
+	/* function name of the caller */
+	const char		*mh_func;
 	/** real address of the buffer */
 	void			*mh_addr;
-	int64_t			 mh_size;
+	int32_t			 mh_size;
 	int32_t			 mh_alignment;
-	int32_t			 mh_tag;
-	uint64_t		 mh_payload[0];
+	/* line number of caller */
+	int32_t			 mh_line;
+	uint16_t		 mh_tag;
+	uint16_t		 mh_magic;
+	char			 mh_payload[0];
+};
+
+/* 16 bytes tail */
+struct dm_tail {
+	uint32_t		 mt_magic;
+	uint32_t		 mt_reserv;
+	struct dm_tls_counter	*mt_counter;
 };
 
 char *dm_mem_tag_query(int tag, int64_t *size_p, int64_t *count_p);
 void  dm_mem_dump_log(void);
+void  dm_use_tls_counter(void);
 
 #define D_CHECK_ALLOC(func, cond, ptr, name, size, count, cname,	\
 			on_error)					\
@@ -158,14 +173,16 @@ void  dm_mem_dump_log(void);
 
 #define DM_ALLOC_CORE(tag, ptr, size, count)				\
 	do {								\
-		(ptr) = (__typeof__(ptr))d_calloc(tag, (count), (size)); \
+		(ptr) = (__typeof__(ptr))d_calloc(tag, (count), (size), \
+						__func__, __LINE__);	\
 		D_CHECK_ALLOC(calloc, true, ptr, #ptr, size,		\
 			      count, #count, 0);			\
 	} while (0)
 
 #define DM_ALLOC_CORE_NZ(tag, ptr, size, count)				\
 	do {								\
-		(ptr) = (__typeof__(ptr))d_malloc(tag, (count) * (size)); \
+		(ptr) = (__typeof__(ptr))d_malloc(tag, (count) * (size),\
+						__func__, __LINE__);	\
 		D_CHECK_ALLOC(malloc, true, ptr, #ptr, size,		\
 			      count, #count, 0);			\
 	} while (0)
@@ -218,7 +235,7 @@ void  dm_mem_dump_log(void);
 #define DM_ALIGNED_ALLOC(tag, ptr, alignment, size)			\
 	do {								\
 		(ptr) = (__typeof__(ptr))d_aligned_alloc(tag, alignment,\
-							 size);		\
+					 size, __func__, __LINE__);	\
 		D_CHECK_ALLOC(aligned_alloc, true, ptr, #ptr,		\
 			      size, 0, #ptr, 0);			\
 	} while (0)
@@ -252,7 +269,8 @@ void  dm_mem_dump_log(void);
 		if (D_SHOULD_FAIL(d_fault_attr_mem))			\
 			(newptr) = NULL;				\
 		else							\
-			(newptr) = d_realloc(tag, optr, _sz);		\
+			(newptr) = d_realloc(tag, optr, _sz,		\
+					__func__, __LINE__);		\
 		if ((newptr) != NULL) {					\
 			if (_cnt <= 1)					\
 				D_DEBUG(DB_MEM,				\

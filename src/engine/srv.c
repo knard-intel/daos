@@ -476,6 +476,7 @@ dss_srv_handler(void *arg)
 	ABT_mutex_unlock(xstream_data.xd_mutex);
 
 	signal_caller = false;
+	dm_use_tls_counter();
 	/* main service progress loop */
 	for (;;) {
 		if (dx->dx_comm) {
