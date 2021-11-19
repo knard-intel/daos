@@ -116,7 +116,7 @@ class TestWithTelemetryIOLatency(IorTestBase, TestWithTelemetry):
         latency = []
         ior_metric_summary = "Results: "
         messages = cmdresult.stdout_text.splitlines()
-        # Get the index whre the summary starts and add one to
+        # Get the index where the summary starts and add one to
         # get to the header.
         idx = messages.index(ior_metric_summary)
         # idx + 1, idx + 2  and idx + 3  are headers.
@@ -270,6 +270,37 @@ class TestWithTelemetryIOLatency(IorTestBase, TestWithTelemetry):
             status["update"] = True
         return status
 
+    def ior_with_transfer_size(self, transfer_size, ior_metrics, operation):
+        """Run IOR command with specified transfer size to verify IO metrics.
+
+        Args:
+            test_metric (str): name of telemetry metrics
+            transfer_size(str): transfer_size
+            operation (str): update or fetch
+        Returns:
+            ior_results: (CmdResult) result of the ior command execution
+            cmdresult (CmdResult): output of job manager
+
+
+        """
+        self.iterations = self.params.get("repetitions", "/run/*")
+        self.container = []
+        self.add_pool(connect=False)
+        oclass = self.ior_cmd.dfs_oclass.value
+        self.add_containers(self.pool, oclass)
+        # Set up cmd flags for read or write and transfer size
+        flags = self.params.get("F", "/run/ior/ior{}flags/".format(operation))
+        self.log.info("<<< Start ior %s transfer_size=%s", operation, transfer_size)
+        self.ior_cmd.transfer_size.update(transfer_size)
+        self.ior_cmd.flags.update(flags)
+        self.ior_cmd.set_daos_params(self.server_group, self.pool, self.container[-1].uuid)
+        # Run ior command
+        ior_results = self.run_ior_with_pool(timeout=200, create_pool=False, create_cont=False)
+        # Destroy the container and the pool.
+        self.destroy_containers(containers=self.container[-1])
+        self.destroy_pools(pools=self.pool)
+        return ior_results
+
     def test_io_latency_telmetry_metrics(self):
         """JIRA ID: DAOS-8624.
 
@@ -283,8 +314,8 @@ class TestWithTelemetryIOLatency(IorTestBase, TestWithTelemetry):
 
         """
         transfer_sizes = self.params.get("transfer_sizes", "/run/*")
-        self.iterations = self.params.get("repetitions", "/run/*")
-        self.container = []
+        #self.iterations = self.params.get("repetitions", "/run/*")
+        #self.container = []
         verification_results = []
         metrics_data = {}
         ior_latency = {}
@@ -295,21 +326,22 @@ class TestWithTelemetryIOLatency(IorTestBase, TestWithTelemetry):
 
         for transfer_size in transfer_sizes:
             ior_latency[transfer_size] = {}
-            self.add_pool(connect=False)
-            oclass = self.ior_cmd.dfs_oclass.value
-            self.add_containers(self.pool, oclass)
+            #self.add_pool(connect=False)
+            #oclass = self.ior_cmd.dfs_oclass.value
+            #self.add_containers(self.pool, oclass)
             for operation in ["update", "fetch"]:
-                flags = self.params.get("F", "/run/ior/ior{}flags/".format(
-                    operation))
-                self.log.info(
-                    "<<< Start ior %s transfer_size=%s", operation, transfer_size)
-                self.ior_cmd.transfer_size.update(transfer_size)
-                self.ior_cmd.flags.update(flags)
-                self.ior_cmd.set_daos_params(
-                    self.server_group, self.pool, self.container[-1].uuid)
+                #flags = self.params.get("F", "/run/ior/ior{}flags/".format(
+                #    operation))
+                #self.log.info(
+                #    "<<< Start ior %s transfer_size=%s", operation, transfer_size)
+                #self.ior_cmd.transfer_size.update(transfer_size)
+                #self.ior_cmd.flags.update(flags)
+                #self.ior_cmd.set_daos_params(
+                #    self.server_group, self.pool, self.container[-1].uuid)
                 # Run ior command
-                ior_results = self.run_ior_with_pool(
-                        timeout=200, create_pool=False, create_cont=False)
+                #ior_results = self.run_ior_with_pool(
+                #        timeout=200, create_pool=False, create_cont=False)
+                ior_results = self.ior_with_transfer_size(transfer_size, operation)
                 ior_latency[transfer_size][operation] = self.get_ior_latency(ior_results)
                 if operation in "update":
                     metrics_data.update(self.telemetry.get_io_metrics(
@@ -318,8 +350,8 @@ class TestWithTelemetryIOLatency(IorTestBase, TestWithTelemetry):
                     metrics_data.update(self.telemetry.get_io_metrics(
                         TelemetryUtils.ENGINE_IO_LATENCY_FETCH_METRICS))
             # Destroy the container and the pool.
-            self.destroy_containers(containers=self.container[-1])
-            self.destroy_pools(pools=self.pool)
+            #self.destroy_containers(containers=self.container[-1])
+            #self.destroy_pools(pools=self.pool)
         for transfer_size in transfer_sizes:
             status_dict = self.verify_rpc_latency_metrics(
                 metrics_data, test_metrics, str(transfer_size))
