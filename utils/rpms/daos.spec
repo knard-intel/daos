@@ -329,8 +329,8 @@ mv test.cov-build %{buildroot}/usr/lib/daos/TESTING/ftest/test.cov
 %endif
 mkdir -p %{buildroot}/%{_sysconfdir}/ld.so.conf.d/
 echo "%{_libdir}/daos_srv" > %{buildroot}/%{_sysconfdir}/ld.so.conf.d/daos.conf
-mkdir -p %{buildroot}/%{_sysconfdir}/sysctl.d/
-install -m 644 utils/rpms/%{sysctl_script_name} %{buildroot}/%{_sysconfdir}/sysctl.d
+mkdir -p %{buildroot}/%{_sysctldir}
+install -m 644 utils/rpms/%{sysctl_script_name} %{buildroot}/%{_sysctldir}
 mkdir -p %{buildroot}/%{_unitdir}
 %if (0%{?rhel} == 7)
 install -m 644 utils/systemd/%{server_svc_name}.pre230 %{buildroot}/%{_unitdir}/%{server_svc_name}
@@ -349,7 +349,7 @@ getent passwd daos_server >/dev/null || useradd -s /sbin/nologin -r -g daos_serv
 %post server
 /sbin/ldconfig
 %systemd_post %{server_svc_name}
-sysctl -p %{_sysconfdir}/sysctl.d/%{sysctl_script_name}
+%sysctl_apply %{sysctl_script_name}
 %preun server
 %systemd_preun %{server_svc_name}
 %postun server
@@ -420,7 +420,7 @@ getent passwd daos_agent >/dev/null || useradd -s /sbin/nologin -r -g daos_agent
 %{_datadir}/%{name}
 %exclude %{_datadir}/%{name}/ioil-ld-opts
 %{_unitdir}/%{server_svc_name}
-%{_sysconfdir}/sysctl.d/%{sysctl_script_name}
+%{_sysctldir}/%{sysctl_script_name}
 
 %files client
 %{_libdir}/libdaos_common.so
