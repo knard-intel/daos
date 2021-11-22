@@ -667,7 +667,6 @@ getent passwd daos_agent >/dev/null || useradd -s /sbin/nologin -r -g daos_agent
 - Update libfabric to v1.12.0
 - Disable grdcopy/gdrapi linkage in libfabric
 
-
 * Thu Mar 18 2021 Maureen Jean <maureen.jean@intel.com> 1.3.0-3
 - Update to python3
 
