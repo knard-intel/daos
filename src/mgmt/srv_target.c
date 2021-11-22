@@ -14,6 +14,7 @@
 #include <sys/sysinfo.h>
 #include <ftw.h>
 #include <dirent.h>
+#include <sched.h>
 
 #include <daos_srv/vos.h>
 #include <daos_srv/pool.h>
@@ -125,6 +126,7 @@ dir_fsync(const char *path)
 	}
 
 	(void)close(fd);
+	sched_yield();
 
 	return rc;
 }
@@ -144,6 +146,7 @@ destroy_cb(const char *path, const struct stat *sb, int flag,
 		rc = unlink(path);
 	if (rc)
 		D_ERROR("failed to remove %s\n", path);
+	sched_yield();
 	return rc;
 }
 
@@ -484,6 +487,8 @@ tgt_vos_create_one(void *varg)
 static int
 tgt_vos_preallocate(uuid_t uuid, daos_size_t scm_size, int tgt_nr)
 {
+	daos_size_t		 size;
+	daos_size_t		 off;
 	char			*path = NULL;
 	int			 i;
 	int			 fd = -1;
@@ -507,22 +512,31 @@ tgt_vos_preallocate(uuid_t uuid, daos_size_t scm_size, int tgt_nr)
 
 		/** Align to 4K or locking the region based on the size will fail */
 		scm_size = D_ALIGNUP(scm_size, 1ULL << 12);
-		/**
-		 * Pre-allocate blocks for vos files in order to provide
-		 * consistent performance and avoid entering into the backend
-		 * filesystem allocator through page faults.
-		 * Use fallocate(2) instead of posix_fallocate(3) since the
-		 * latter is bogus with tmpfs.
-		 */
-		rc = fallocate(fd, 0, 0, scm_size);
-		if (rc) {
-			rc = daos_errno2der(errno);
-			D_ERROR(DF_UUID": failed to allocate vos file %s with "
-				"size: "DF_U64": "DF_RC"\n",
-				DP_UUID(uuid), path, scm_size, DP_RC(rc));
+		size = 1024ULL * 1024ULL * 1024ULL; /* Allocation chunk size: 1Gb */
+		off = 0;
+		do {
+			if (off + size > scm_size)
+				size = scm_size - off;
+			/**
+			 * Pre-allocate blocks for vos files in order to provide
+			 * consistent performance and avoid entering into the backend
+			 * filesystem allocator through page faults.
+			 * Use fallocate(2) instead of posix_fallocate(3) since the
+			 * latter is bogus with tmpfs.
+			 */
+			rc = fallocate(fd, 0, off, size);
+			if (rc) {
+				rc = daos_errno2der(errno);
+				D_ERROR(DF_UUID": failed to allocate vos file %s with "
+					"size: "DF_U64" of "DF_U64": "DF_RC"\n",
+					DP_UUID(uuid), path, off + size, scm_size, DP_RC(rc));
+				break;
+			}
+			usleep(1000);
+			off += size;
+		} while (off < scm_size);
+		if (rc)
 			break;
-		}
-
 		rc = fsync(fd);
 		(void)close(fd);
 		fd = -1;
